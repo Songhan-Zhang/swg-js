@@ -20,33 +20,34 @@
  * IMPORTANT: All flags should also be added to the e2e test configuration in
  * nightwatch.conf.js.
  */
-export enum ExperimentFlags {}
+export enum ExperimentFlags {
+  /**
+   * Experiment flag for enabling publication_id suffix to browser storage key.
+   */
+  ENABLE_PUBLICATION_ID_SUFFIX_FOR_STORAGE_KEY = 'enable-pub-id-suffix-for-storage-key',
+}
 
 /**
  * Experiment flags within article experiment config.
  */
 export enum ArticleExperimentFlags {
   /**
-   * Experiment flag for recording Frequency Capping by dismissals instead of
-   * impressions. String is abbreviated.
-   */
-  FREQUENCY_CAPPING_BY_DISMISSALS = 'fcbd_exp',
-
-  /**
-   * Experiment flag for enabling Frequency Capping local storage of impressions.
-   */
-  FREQUENCY_CAPPING_LOCAL_STORAGE = 'frequency_capping_local_storage_experiment',
-
-  /**
-   * Experiment flag for enabling Prompt Frequency Capping experiment for
-   * triggering.
-   */
-  PROMPT_FREQUENCY_CAPPING_EXPERIMENT = 'prompt_frequency_capping_experiment',
-
-  /**
    * Experiment flag to enable paywall background click behavior so that links
    * cannot be clicked through the darkened background and so that it closes
    * closable popups.
    */
   BACKGROUND_CLICK_BEHAVIOR_EXPERIMENT = 'background_click_behavior_experiment',
+
+  /**
+   * [FPA M0.5] Experiment flag to enable the new autoPromptManager flow to use
+   * actionOrchestration from the article response as the source of the
+   * targeted intervention funnel.
+   */
+  ACTION_ORCHESTRATION_EXPERIMENT = 'action_orchestration_experiment',
+
+  /**
+   * Experiment flag that filters out dismissible monetary CTAs if reader is
+   * ineligible to purchase.
+   */
+  DISMISSIBILITY_CTA_FILTER_EXPERIMENT = 'dismissibility_cta_filter_experiment',
 }

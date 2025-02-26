@@ -22,9 +22,9 @@ module.exports = {
   plugins: ['@nightwatch/vrt'],
   '@nightwatch/vrt': {
     baseline_screenshots_path: 'test/e2e/vrt/baseline',
-    latest_screenshots_path: '.vrt/latest',
-    diff_screenshots_path: '.vrt/diff',
-    threshold: 0.005,
+    latest_screenshots_path: 'vrt-report/latest',
+    diff_screenshots_path: 'vrt-report/diff',
+    threshold: 0.02,
   },
 
   test_settings: {

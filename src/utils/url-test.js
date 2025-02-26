@@ -271,6 +271,7 @@ describe('serializeProtoMessageForUrl', () => {
       ['Timestamp', 22222, 0],
       ['Duration', 100, 0],
       false,
+      'baseUrl',
     ];
     const analyticsEventMetaArray = ['AnalyticsEventMeta', 1, true, null];
     const eventParamsArray = [
@@ -318,20 +319,6 @@ describe('serializeProtoMessageForUrl', () => {
 });
 
 describe('getCanonicalUrl', () => {
-  it('should query page', () => {
-    const url = 'https://norcal.com/article1';
-    let pageQuery = null;
-    const FAKE_DOC = {
-      getRootNode: () => ({
-        querySelector: (qry) => {
-          pageQuery = qry;
-          return {href: url};
-        },
-      }),
-    };
-    expect(getCanonicalUrl(FAKE_DOC)).to.equal(url);
-    expect(pageQuery).to.equal("link[rel='canonical']");
-  });
   it('should return the page URL without a query string when a canonical tag is not present', () => {
     const url = 'https://example.com/article1';
     const FAKE_DOC = {
@@ -347,6 +334,23 @@ describe('getCanonicalUrl', () => {
       }),
     };
     expect(getCanonicalUrl(FAKE_DOC)).to.equal(url);
+  });
+});
+
+describe('getCanonicalTag', () => {
+  it('should query page', () => {
+    const url = 'https://norcal.com/article1';
+    let pageQuery = null;
+    const FAKE_DOC = {
+      getRootNode: () => ({
+        querySelector: (qry) => {
+          pageQuery = qry;
+          return {href: url};
+        },
+      }),
+    };
+    expect(getCanonicalUrl(FAKE_DOC)).to.equal(url);
+    expect(pageQuery).to.equal("link[rel='canonical']");
   });
 });
 

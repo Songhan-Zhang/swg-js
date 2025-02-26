@@ -32,7 +32,7 @@ import {Doc} from '../model/doc';
 import {INTERNAL_RUNTIME_VERSION} from '../constants';
 import {createElement} from '../utils/dom';
 import {feUrl} from './services';
-import {getCanonicalUrl} from '../utils/url';
+import {getCanonicalTag, getCanonicalUrl} from '../utils/url';
 import {getOnExperiments} from './experiments';
 import {getSwgTransactionId} from '../utils/string';
 import {log} from '../utils/log';
@@ -210,6 +210,9 @@ export class AnalyticsService {
     context.setUrl(getCanonicalUrl(this.doc_));
     context.setIsLockedContent(this.deps_.pageConfig().isLocked());
 
+    // Default to empty, this is for investigative purposes only
+    context.setUrlFromMarkup(getCanonicalTag(this.doc_) || '');
+
     const utmParams = parseQueryString(this.getQueryString_());
     const campaign = utmParams['utm_campaign'];
     const medium = utmParams['utm_medium'];
@@ -286,6 +289,9 @@ export class AnalyticsService {
     const meta = new AnalyticsEventMeta();
     meta.setEventOriginator(event.eventOriginator);
     meta.setIsFromUserAction(!!event.isFromUserAction);
+    if (!!event.configurationId) {
+      meta.setConfigurationId(event.configurationId);
+    }
     // Update the request's timestamp.
     this.context_.setClientTimestamp(toTimestamp(event.timestamp!));
     const loadEventStartDelay = this.getLoadEventStartDelay_();

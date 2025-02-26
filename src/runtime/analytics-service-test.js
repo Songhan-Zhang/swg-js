@@ -24,8 +24,8 @@ import {
 import {AnalyticsService} from './analytics-service';
 import {ClientEventManager} from './client-event-manager';
 import {ConfiguredRuntime} from './runtime';
-import {Constants} from '../utils/constants';
 import {PageConfig} from '../model/page-config';
+import {StorageKeys} from '../utils/constants';
 import {feUrl} from './services';
 import {getStyle} from '../utils/style';
 import {setExperimentsStringForTesting} from './experiments';
@@ -195,7 +195,7 @@ describes.realWin('AnalyticsService', (env) => {
       analyticsService.setReadyForLogging();
       storageMock
         .expects('get')
-        .withExactArgs(Constants.USER_TOKEN)
+        .withExactArgs(StorageKeys.USER_TOKEN)
         .resolves('swgUserToken')
         .once();
       analyticsService.start();
@@ -246,6 +246,7 @@ describes.realWin('AnalyticsService', (env) => {
         eventOriginator: EventOriginator.SWG_CLIENT,
         isFromUserAction: true,
         additionalParameters: {droppedData: true},
+        configurationId: 'configurationId',
       });
       expect(analyticsService.lastAction).to.not.be.null;
       await analyticsService.lastAction;
@@ -258,7 +259,7 @@ describes.realWin('AnalyticsService', (env) => {
       expect(request2.getEvent()).to.equal(AnalyticsEvent.IMPRESSION_PAYWALL);
       expect(meta.getEventOriginator()).to.equal(EventOriginator.SWG_CLIENT);
       expect(meta.getIsFromUserAction()).to.be.true;
-      expect(meta.getConfigurationId()).to.be.null;
+      expect(meta.getConfigurationId()).to.equal('configurationId');
 
       // It should have a working logging promise
       const p = analyticsService.getLoggingPromise();
@@ -443,6 +444,7 @@ describes.realWin('AnalyticsService', (env) => {
       expect(context.getReferringOrigin()).to.equal(
         'https://scenic-2017.appspot.com'
       );
+      expect(context.getUrlFromMarkup()).to.equal(URL);
       expect(analyticsService.getSku()).to.equal('basic');
       const labels = context.getLabelList();
       expect(labels.length).to.equal(1);

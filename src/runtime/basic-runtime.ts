@@ -23,6 +23,7 @@ import {
   AutoPromptType,
   BasicSubscriptions,
   ClientOptions,
+  ContentType,
 } from '../api/basic-subscriptions';
 import {ButtonApi, ButtonAttributeValues} from './button-api';
 import {Callbacks} from './callbacks';
@@ -30,7 +31,6 @@ import {ClientConfigManager} from './client-config-manager';
 import {ClientEventManager} from './client-event-manager';
 import {Config} from '../api/subscriptions';
 import {ConfiguredRuntime} from './runtime';
-import {Constants} from '../utils/constants';
 import {Deps} from './deps';
 import {DialogManager} from '../components/dialog-manager';
 import {Doc, resolveDoc} from '../model/doc';
@@ -44,6 +44,7 @@ import {PageConfigWriter} from '../model/page-config-writer';
 import {PayClient} from './pay-client';
 import {SWG_I18N_STRINGS} from '../i18n/swg-strings';
 import {Storage} from './storage';
+import {StorageKeys} from '../utils/constants';
 import {SubscribeResponse} from '../api/subscribe-response';
 import {Toast} from '../ui/toast';
 import {acceptPortResultData} from '../utils/activity-utils';
@@ -243,6 +244,7 @@ export class BasicRuntime implements BasicSubscriptions {
       autoPromptType,
       alwaysShow,
       isClosable,
+      contentType: this.getContentType_(isAccessibleForFree ?? isOpenAccess),
     });
     this.setOnLoginRequest();
     this.processEntitlements();
@@ -271,6 +273,7 @@ export class BasicRuntime implements BasicSubscriptions {
     autoPromptType?: AutoPromptType;
     alwaysShow?: boolean;
     isClosable?: boolean;
+    contentType: ContentType;
   }): Promise<void> {
     const runtime = await this.configured_(false);
     runtime.setupAndShowAutoPrompt(options);
@@ -302,6 +305,13 @@ export class BasicRuntime implements BasicSubscriptions {
   isOpenAccessProductId_(productId: string): boolean {
     return productId.endsWith(':openaccess');
   }
+
+  /**
+   * Returns ContentType Enum string from isLocked page config status.
+   */
+  getContentType_(isOpenAccess: boolean): ContentType {
+    return isOpenAccess ? ContentType.OPEN : ContentType.CLOSED;
+  }
 }
 
 export class ConfiguredBasicRuntime implements Deps, BasicSubscriptions {
@@ -322,7 +332,6 @@ export class ConfiguredBasicRuntime implements Deps, BasicSubscriptions {
       configPromise?: Promise<void>;
       enableDefaultMeteringHandler?: boolean;
       enableGoogleAnalytics?: boolean;
-      useArticleEndpoint?: boolean;
     } = {},
     config?: Config,
     clientOptions?: ClientOptions,
@@ -335,7 +344,6 @@ export class ConfiguredBasicRuntime implements Deps, BasicSubscriptions {
     integr.configPromise ||= Promise.resolve();
     integr.fetcher = integr.fetcher || new XhrFetcher(this.win_);
     integr.enableGoogleAnalytics = true;
-    integr.useArticleEndpoint = true;
 
     this.fetcher_ = integr.fetcher;
 
@@ -526,7 +534,7 @@ export class ConfiguredBasicRuntime implements Deps, BasicSubscriptions {
       this.entitlementsManager().pushNextEntitlements(jwt);
       const userToken = response['usertoken'];
       if (userToken) {
-        this.storage().set(Constants.USER_TOKEN, userToken, true);
+        this.storage().set(StorageKeys.USER_TOKEN, userToken, true);
       }
 
       // Show 'Signed in as abc@gmail.com' toast on the pub page.
@@ -549,6 +557,12 @@ export class ConfiguredBasicRuntime implements Deps, BasicSubscriptions {
         this.configuredClassicRuntime_.getLastContributionsFlow();
       if (lastContributionsFlow) {
         lastContributionsFlow.showNoEntitlementFoundToast();
+        return;
+      }
+
+      const lastMeterFlow = this.entitlementsManager().getLastMeterToast();
+      if (lastMeterFlow) {
+        lastMeterFlow.showNoEntitlementFoundToast();
         return;
       }
 
@@ -580,6 +594,7 @@ export class ConfiguredBasicRuntime implements Deps, BasicSubscriptions {
     autoPromptType?: AutoPromptType;
     alwaysShow?: boolean;
     isClosable?: boolean;
+    contentType: ContentType;
   }): Promise<void> {
     return this.autoPromptManager_.showAutoPrompt(options);
   }

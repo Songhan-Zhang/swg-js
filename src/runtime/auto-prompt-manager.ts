@@ -16,16 +16,23 @@
 
 import {AnalyticsEvent, EventOriginator} from '../proto/api_messages';
 import {Article, EntitlementsManager} from './entitlements-manager';
+import {ArticleExperimentFlags} from './experiment-flags';
 import {
   AudienceActionFlow,
   AudienceActionIframeFlow,
 } from './audience-action-flow';
 import {AudienceActionLocalFlow} from './audience-action-local-flow';
-import {AutoPromptType} from '../api/basic-subscriptions';
+import {AutoPromptType, ContentType} from '../api/basic-subscriptions';
 import {ClientConfig} from '../model/client-config';
 import {ClientConfigManager} from './client-config-manager';
 import {ClientEvent} from '../api/client-event-manager-api';
 import {ClientEventManager} from './client-event-manager';
+import {
+  Closability,
+  InterventionFunnel,
+  InterventionOrchestration,
+  RepeatabilityType,
+} from '../api/action-orchestration';
 import {ConfiguredRuntime} from './runtime';
 import {Deps} from './deps';
 import {Doc} from '../model/doc';
@@ -33,6 +40,7 @@ import {Duration, FrequencyCapConfig} from '../model/auto-prompt-config';
 import {Entitlements} from '../api/entitlements';
 import {GoogleAnalyticsEventListener} from './google-analytics-event-listener';
 import {Intervention} from './intervention';
+import {InterventionType} from '../api/intervention-type';
 import {MiniPromptApi} from './mini-prompt-api';
 import {OffersRequest} from '../api/subscriptions';
 import {PageConfig} from '../model/page-config';
@@ -47,6 +55,7 @@ const TYPE_NEWSLETTER_SIGNUP = 'TYPE_NEWSLETTER_SIGNUP';
 const TYPE_REGISTRATION_WALL = 'TYPE_REGISTRATION_WALL';
 const TYPE_REWARDED_SURVEY = 'TYPE_REWARDED_SURVEY';
 const TYPE_REWARDED_AD = 'TYPE_REWARDED_AD';
+const TYPE_BYO_CTA = 'TYPE_BYO_CTA';
 const SECOND_IN_MILLIS = 1000;
 const TWO_WEEKS_IN_MILLIS = 2 * 604800000;
 const PREFERENCE_PUBLISHER_PROVIDED_PROMPT =
@@ -67,6 +76,7 @@ const DISMISSAL_EVENTS_TO_ACTION_MAP = new Map([
   [AnalyticsEvent.ACTION_REGWALL_OPT_IN_CLOSE, TYPE_REGISTRATION_WALL],
   [AnalyticsEvent.ACTION_SURVEY_CLOSED, TYPE_REWARDED_SURVEY],
   [AnalyticsEvent.ACTION_REWARDED_AD_CLOSE, TYPE_REWARDED_AD],
+  [AnalyticsEvent.ACTION_BYO_CTA_CLOSE, TYPE_BYO_CTA],
   [AnalyticsEvent.ACTION_SWG_SUBSCRIPTION_MINI_PROMPT_CLOSE, TYPE_SUBSCRIPTION],
   [AnalyticsEvent.ACTION_SUBSCRIPTION_OFFERS_CLOSED, TYPE_SUBSCRIPTION],
 ]);
@@ -81,6 +91,7 @@ const COMPLETION_EVENTS_TO_ACTION_MAP = new Map([
   [AnalyticsEvent.ACTION_REGWALL_OPT_IN_BUTTON_CLICK, TYPE_REGISTRATION_WALL],
   [AnalyticsEvent.ACTION_SURVEY_SUBMIT_CLICK, TYPE_REWARDED_SURVEY],
   [AnalyticsEvent.ACTION_REWARDED_AD_VIEW, TYPE_REWARDED_AD],
+  [AnalyticsEvent.ACTION_BYO_CTA_BUTTON_CLICK, TYPE_BYO_CTA],
   [AnalyticsEvent.EVENT_SUBSCRIPTION_PAYMENT_COMPLETE, TYPE_SUBSCRIPTION],
 ]);
 
@@ -92,6 +103,7 @@ const IMPRESSION_EVENTS_TO_ACTION_MAP = new Map([
   [AnalyticsEvent.IMPRESSION_REGWALL_OPT_IN, TYPE_REGISTRATION_WALL],
   [AnalyticsEvent.IMPRESSION_SURVEY, TYPE_REWARDED_SURVEY],
   [AnalyticsEvent.IMPRESSION_REWARDED_AD, TYPE_REWARDED_AD],
+  [AnalyticsEvent.IMPRESSION_BYO_CTA, TYPE_BYO_CTA],
   [AnalyticsEvent.IMPRESSION_SWG_SUBSCRIPTION_MINI_PROMPT, TYPE_SUBSCRIPTION],
   [AnalyticsEvent.IMPRESSION_OFFERS, TYPE_SUBSCRIPTION],
 ]);
@@ -107,6 +119,7 @@ export interface ShowAutoPromptParams {
   autoPromptType?: AutoPromptType;
   alwaysShow?: boolean;
   isClosable?: boolean;
+  contentType: ContentType;
 }
 
 interface ActionsTimestamps {
@@ -129,6 +142,10 @@ export class AutoPromptManager {
   private lastAudienceActionFlow_: AudienceActionFlow | null = null;
   private isClosable_: boolean | undefined;
   private autoPromptType_: AutoPromptType | undefined;
+  private contentType_: ContentType | undefined;
+  private shouldRenderOnsitePreview_: boolean = false;
+  private actionOrchestrationExperiment_: boolean = false;
+  private dismissibilityCtaFilterExperiment_: boolean = false;
 
   private readonly doc_: Doc;
   private readonly pageConfig_: PageConfig;
@@ -180,13 +197,15 @@ export class AutoPromptManager {
       return;
     }
 
+    this.contentType_ = params.contentType;
+
     // Manual override of display rules, mainly for demo purposes. Requires
     // contribution or subscription to be set as autoPromptType in snippet.
     if (params.alwaysShow) {
       this.autoPromptType_ = this.getPromptTypeToDisplay_(
         params.autoPromptType
       );
-      this.isClosable_ = params.isClosable ?? !this.isSubscription_();
+      this.isClosable_ = this.contentType_ != ContentType.CLOSED;
       const promptFn = this.getMonetizationPromptFn_();
       promptFn();
       return;
@@ -203,7 +222,13 @@ export class AutoPromptManager {
 
     this.setArticleExperimentFlags_(article);
 
-    this.showAutoPrompt_(clientConfig, entitlements, article, params);
+    this.shouldRenderOnsitePreview_ = !!article?.previewEnabled;
+
+    if (this.shouldRenderOnsitePreview_) {
+      this.showPreviewAutoPrompt_(article!, params);
+    } else {
+      this.showAutoPrompt_(clientConfig, entitlements, article, params);
+    }
   }
 
   /**
@@ -214,6 +239,45 @@ export class AutoPromptManager {
       return;
     }
     // Set experiment flags here.
+    this.actionOrchestrationExperiment_ = this.isArticleExperimentEnabled_(
+      article,
+      ArticleExperimentFlags.ACTION_ORCHESTRATION_EXPERIMENT
+    );
+    this.dismissibilityCtaFilterExperiment_ = this.isArticleExperimentEnabled_(
+      article,
+      ArticleExperimentFlags.DISMISSIBILITY_CTA_FILTER_EXPERIMENT
+    );
+  }
+
+  /**
+   * Displays the appropriate auto prompt for onsite preview.
+   */
+  private async showPreviewAutoPrompt_(
+    article: Article,
+    params: ShowAutoPromptParams
+  ): Promise<void> {
+    const actions = article.audienceActions?.actions;
+    if (!actions || actions.length === 0) {
+      return;
+    }
+    // Article response is honored over code snippet in case of conflict, such
+    // as when publisher changes revenue model but does not update snippet.
+    this.autoPromptType_ = this.getAutoPromptType_(
+      article.audienceActions?.actions,
+      params.autoPromptType
+    )!;
+
+    // For FPA M0.5 - default to the contentType.
+    // TODO(b/364344782): Determine closability for FPA M1+.
+    this.isClosable_ = this.contentType_ != ContentType.CLOSED;
+
+    const previewAction = actions[0];
+
+    const promptFn = this.getAutoPromptFunction_(previewAction);
+
+    // Directly invoke preview prompt at first, we can add delay later on if needed.
+    promptFn();
+    return;
   }
 
   /**
@@ -246,28 +310,50 @@ export class AutoPromptManager {
       params.autoPromptType
     )!;
 
-    // Default isClosable to what is set in the page config.
-    // Otherwise, the prompt is blocking for publications with a
-    // subscription revenue model, while all others can be dismissed.
-    this.isClosable_ = params.isClosable ?? !this.isSubscription_();
+    let potentialAction;
+    if (this.actionOrchestrationExperiment_ && !!article.actionOrchestration) {
+      // FPA M0.5 Flow: get next Intervention of the Targeted Funnel.
+      const nextOrchestration = await this.getInterventionOrchestration_(
+        clientConfig,
+        article
+      );
 
-    // Frequency cap flow utilizes config and timestamps to determine next
-    // action. Metered flow strictly follows prompt order. Display delay is
-    // applied to all dismissible prompts.
-    const frequencyCapConfig =
-      clientConfig.autoPromptConfig?.frequencyCapConfig;
-    const potentialAction = await this.getPotentialAction_({
-      article,
-      frequencyCapConfig,
-    });
-    const promptFn = this.isMonetizationAction_(potentialAction?.type)
-      ? this.getMonetizationPromptFn_()
-      : potentialAction
-      ? this.getAudienceActionPromptFn_({
-          actionType: potentialAction.type,
-          configurationId: potentialAction.configurationId,
-          preference: potentialAction.preference,
-        })
+      if (!!nextOrchestration) {
+        switch (nextOrchestration?.closability) {
+          case Closability.BLOCKING:
+            this.isClosable_ = false;
+            break;
+          case Closability.DISMISSIBLE:
+            this.isClosable_ = true;
+            break;
+          default:
+            this.isClosable_ = this.contentType_ != ContentType.CLOSED;
+        }
+        potentialAction = article.audienceActions?.actions?.find(
+          (action) => action.configurationId === nextOrchestration.configId
+        );
+      }
+    } else {
+      // Legacy Frequency Capping flow.
+
+      // Default isClosable to what is set in the page config.
+      // Otherwise, the prompt is blocking for publications with a
+      // subscription revenue model, while all others can be dismissed.
+      this.isClosable_ = params.isClosable ?? !this.isSubscription_();
+
+      // Frequency cap flow utilizes config and timestamps to determine next
+      // action. Metered flow strictly follows prompt order. Display delay is
+      // applied to all dismissible prompts.
+      const frequencyCapConfig =
+        clientConfig.autoPromptConfig?.frequencyCapConfig;
+      potentialAction = await this.getPotentialAction_({
+        article,
+        frequencyCapConfig,
+      });
+    }
+
+    const promptFn = potentialAction
+      ? this.getAutoPromptFunction_(potentialAction)
       : undefined;
 
     if (!promptFn) {
@@ -348,7 +434,7 @@ export class AutoPromptManager {
 
     const actionsTimestamps = await this.getTimestamps();
     actions = actions.filter((action) =>
-      this.checkActionEligibility_(action.type, actionsTimestamps!)
+      this.checkActionEligibility_(action, actionsTimestamps!)
     );
 
     if (actions.length === 0) {
@@ -425,6 +511,123 @@ export class AutoPromptManager {
     return potentialAction;
   }
 
+  private async getInterventionOrchestration_(
+    clientConfig: ClientConfig,
+    article: Article
+  ): Promise<InterventionOrchestration | void> {
+    const eligibleActions = article.audienceActions?.actions;
+    let interventionOrchestration =
+      article.actionOrchestration?.interventionFunnel?.interventions;
+    if (!eligibleActions?.length || !interventionOrchestration?.length) {
+      return;
+    }
+
+    // Complete client-side eligibility checks for actions.
+    const actionsTimestamps = await this.getTimestamps();
+    const eligibleActionIds = new Set(
+      eligibleActions
+        .filter((action) =>
+          this.checkActionEligibility_(action, actionsTimestamps!)
+        )
+        .map((action) => action.configurationId)
+    );
+    if (eligibleActionIds.size === 0) {
+      return;
+    }
+
+    // Filter the funnel of interventions by eligibility.
+    const numberOfCompletionsMap = new Map(
+      article
+        .audienceActions!.actions!.filter(
+          (action) => !!action.numberOfCompletions
+        )
+        .map((action) => [action.configurationId!, action.numberOfCompletions!])
+    );
+    interventionOrchestration = interventionOrchestration.filter(
+      (intervention) =>
+        this.checkOrchestrationEligibility_(
+          intervention,
+          eligibleActionIds,
+          numberOfCompletionsMap,
+          clientConfig
+        )
+    );
+    if (interventionOrchestration.length === 0) {
+      return;
+    }
+
+    if (this.contentType_ === ContentType.CLOSED) {
+      return interventionOrchestration[0];
+    }
+
+    // Only other supported ContentType is OPEN.
+    let nextOrchestration: InterventionOrchestration | undefined = undefined;
+    // Check Default FrequencyCapConfig is valid.
+    if (
+      !this.isValidFrequencyCap_(
+        clientConfig.autoPromptConfig?.frequencyCapConfig
+      )
+    ) {
+      this.eventManager_.logSwgEvent(
+        AnalyticsEvent.EVENT_FREQUENCY_CAP_CONFIG_NOT_FOUND_ERROR
+      );
+      return interventionOrchestration[0];
+    }
+
+    // b/325512849: Evaluate prompt frequency cap before global frequency cap.
+    // This disambiguates the scenarios where a reader meets the cap when the
+    // reader is only eligible for 1 prompt vs. when the publisher only has 1
+    // prompt configured.
+    for (const orchestration of interventionOrchestration) {
+      const promptFrequencyCapDuration = this.getPromptFrequencyCapDuration_(
+        clientConfig.autoPromptConfig?.frequencyCapConfig!,
+        orchestration
+      );
+      if (this.isValidFrequencyCapDuration_(promptFrequencyCapDuration)) {
+        const timestamps = this.getTimestampsForPromptFrequency_(
+          actionsTimestamps,
+          orchestration
+        );
+        if (this.isFrequencyCapped_(promptFrequencyCapDuration!, timestamps)) {
+          this.eventManager_.logSwgEvent(
+            AnalyticsEvent.EVENT_PROMPT_FREQUENCY_CAP_MET
+          );
+          continue;
+        }
+      }
+      nextOrchestration = orchestration;
+      break;
+    }
+
+    if (!nextOrchestration) {
+      return;
+    }
+
+    const globalFrequencyCapDuration = this.getGlobalFrequencyCapDuration_(
+      clientConfig.autoPromptConfig?.frequencyCapConfig!,
+      article.actionOrchestration?.interventionFunnel!
+    );
+    if (this.isValidFrequencyCapDuration_(globalFrequencyCapDuration)) {
+      const globalTimestamps = Array.prototype.concat.apply(
+        [],
+        Object.entries(actionsTimestamps!).map(([type, timestamps]) =>
+          type === nextOrchestration!.type
+            ? timestamps.completions // Completed repeatable actions count towards global frequency
+            : timestamps.impressions
+        )
+      );
+      if (
+        this.isFrequencyCapped_(globalFrequencyCapDuration!, globalTimestamps)
+      ) {
+        this.eventManager_.logSwgEvent(
+          AnalyticsEvent.EVENT_GLOBAL_FREQUENCY_CAP_MET
+        );
+        return;
+      }
+    }
+    return nextOrchestration;
+  }
+
   /**
    * Returns a function to show the appropriate monetization prompt,
    * or undefined if the type of prompt cannot be determined.
@@ -461,7 +664,7 @@ export class AutoPromptManager {
       const audienceActionFlow: AudienceActionFlow =
         actionType === TYPE_REWARDED_AD
           ? new AudienceActionLocalFlow(this.deps_, {
-              action: actionType,
+              action: actionType as InterventionType,
               configurationId,
               autoPromptType: this.autoPromptType_,
               isClosable: this.isClosable_,
@@ -469,15 +672,17 @@ export class AutoPromptManager {
                 /* shouldAnimateFade */ false
               ),
               calledManually: false,
+              shouldRenderPreview: !!this.shouldRenderOnsitePreview_,
             })
           : actionType === TYPE_NEWSLETTER_SIGNUP &&
             preference === PREFERENCE_PUBLISHER_PROVIDED_PROMPT
           ? new AudienceActionLocalFlow(this.deps_, {
-              action: actionType,
+              action: actionType as InterventionType,
               configurationId,
               autoPromptType: this.autoPromptType_,
               isClosable: this.isClosable_,
               calledManually: false,
+              shouldRenderPreview: !!this.shouldRenderOnsitePreview_,
             })
           : new AudienceActionIframeFlow(this.deps_, {
               action: actionType,
@@ -485,6 +690,7 @@ export class AutoPromptManager {
               autoPromptType: this.autoPromptType_,
               isClosable: this.isClosable_,
               calledManually: false,
+              shouldRenderPreview: !!this.shouldRenderOnsitePreview_,
             });
       this.setLastAudienceActionFlow(audienceActionFlow);
       audienceActionFlow.start();
@@ -590,8 +796,17 @@ export class AutoPromptManager {
   private async handleFrequencyCappingLocalStorage_(
     analyticsEvent: AnalyticsEvent
   ): Promise<void> {
-    if (!this.isClosable_) {
-      return;
+    // For FPA M0.5, do not log frequency capping event for closed contentType. Blocking
+    // interventions on Open content will still log impression & completion timestamps
+    // (but not dismissal).
+    if (this.actionOrchestrationExperiment_) {
+      if (this.contentType_ === ContentType.CLOSED) {
+        return;
+      }
+    } else {
+      if (!this.isClosable_) {
+        return;
+      }
     }
 
     if (
@@ -657,6 +872,19 @@ export class AutoPromptManager {
       },
       {}
     );
+  }
+
+  private getTimestampsForPromptFrequency_(
+    timestamps: ActionsTimestamps,
+    orchestration: InterventionOrchestration
+  ) {
+    const actionTimestamps = timestamps[orchestration.type];
+    return orchestration.closability === Closability.BLOCKING
+      ? actionTimestamps?.completions || []
+      : [
+          ...(actionTimestamps?.dismissals || []),
+          ...(actionTimestamps?.completions || []),
+        ];
   }
 
   isValidActionsTimestamps_(timestamps: ActionsTimestamps) {
@@ -745,6 +973,85 @@ export class AutoPromptManager {
   private getInnerWidth_(): number {
     return this.doc_.getWin()./* OK */ innerWidth;
   }
+
+  /**
+   * Checks AudienceAction eligbility, used to filter potential actions.
+   */
+  private checkActionEligibility_(
+    action: Intervention,
+    timestamps: ActionsTimestamps
+  ): boolean {
+    if (action.type === TYPE_REWARDED_SURVEY) {
+      const isAnalyticsEligible =
+        GoogleAnalyticsEventListener.isGaEligible(this.deps_) ||
+        GoogleAnalyticsEventListener.isGtagEligible(this.deps_) ||
+        GoogleAnalyticsEventListener.isGtmEligible(this.deps_);
+      if (!isAnalyticsEligible) {
+        return false;
+      }
+      // Do not show survey if there is a previous completion record.
+      // Client side eligibility is required to handle identity transitions
+      // after sign-in flow. TODO(b/332759781): update survey completion check
+      // to persist even after 2 weeks.
+      return !(timestamps[TYPE_REWARDED_SURVEY]?.completions || []).length;
+    }
+    return true;
+  }
+
+  /**
+   * Checks Intervention eligibility, used to filter interventions in a given
+   * funnel.
+   */
+  private checkOrchestrationEligibility_(
+    orchestration: InterventionOrchestration,
+    eligibleActionIds: Set<string | undefined>,
+    numberOfCompletionsMap: Map<string, number>,
+    clientConfig: ClientConfig
+  ): boolean {
+    const {repeatability, closability, configId} = orchestration;
+    if (!eligibleActionIds.has(configId)) {
+      return false;
+    }
+
+    if (repeatability?.type !== RepeatabilityType.INFINITE) {
+      const maximumNumberOfCompletions =
+        RepeatabilityType.FINITE === repeatability?.type
+          ? repeatability.count || 1
+          : 1;
+      let numberOfCompletions;
+      if (!numberOfCompletionsMap.has(configId)) {
+        if (RepeatabilityType.FINITE === repeatability?.type) {
+          this.eventManager_.logSwgEvent(
+            AnalyticsEvent.EVENT_COMPLETION_COUNT_FOR_REPEATABLE_ACTION_MISSING_ERROR
+          );
+        }
+        numberOfCompletions = 0;
+      } else {
+        numberOfCompletions = numberOfCompletionsMap.get(configId)!;
+      }
+      if (numberOfCompletions! >= maximumNumberOfCompletions) {
+        return false;
+      }
+    }
+
+    // Prevent readers from seeing dismissible CTAs they can't interact with.
+    const readerCannotPurchase =
+      !!clientConfig?.uiPredicates?.purchaseUnavailableRegion &&
+      this.isMonetizationAction_(orchestration.type);
+    const isDismissible =
+      this.contentType_ !== ContentType.CLOSED ||
+      closability === Closability.DISMISSIBLE;
+    if (
+      this.dismissibilityCtaFilterExperiment_ &&
+      isDismissible &&
+      readerCannotPurchase
+    ) {
+      return false;
+    }
+
+    return true;
+  }
+
   /**
    * Computes if the frequency cap is met from the timestamps of previous
    * provided by using the maximum/most recent timestamp.
@@ -760,36 +1067,37 @@ export class AutoPromptManager {
     const lastImpression = Math.max(...timestamps);
     const durationInMs =
       (frequencyCapDuration.seconds || 0) * SECOND_IN_MILLIS +
-      this.nanoToMiliseconds_(frequencyCapDuration.nano || 0);
+      this.nanoToMiliseconds_(frequencyCapDuration.nanos || 0);
     return Date.now() - lastImpression < durationInMs;
   }
 
-  private nanoToMiliseconds_(nano: number): number {
-    return Math.floor(nano / Math.pow(10, 6));
+  private nanoToMiliseconds_(nanos: number): number {
+    return Math.floor(nanos / Math.pow(10, 6));
   }
 
-  /**
-   * Checks AudienceAction eligbility, used to filter potential actions.
-   */
-  private checkActionEligibility_(
-    actionType: string,
-    timestamps: ActionsTimestamps
-  ): boolean {
-    if (actionType === TYPE_REWARDED_SURVEY) {
-      const isAnalyticsEligible =
-        GoogleAnalyticsEventListener.isGaEligible(this.deps_) ||
-        GoogleAnalyticsEventListener.isGtagEligible(this.deps_) ||
-        GoogleAnalyticsEventListener.isGtmEligible(this.deps_);
-      if (!isAnalyticsEligible) {
-        return false;
-      }
-      // Do not show survey if there is a previous completion record.
-      // Client side eligibility is required to handle identity transitions
-      // after sign-in flow. TODO(b/332759781): update survey completion check
-      // to persist even after 2 weeks.
-      return !(timestamps[TYPE_REWARDED_SURVEY]?.completions || []).length;
+  private getPromptFrequencyCapDuration_(
+    frequencyCapConfig: FrequencyCapConfig,
+    interventionOrchestration: InterventionOrchestration
+  ): Duration | undefined {
+    const duration = interventionOrchestration.promptFrequencyCap?.duration;
+
+    if (!duration) {
+      this.eventManager_.logSwgEvent(
+        AnalyticsEvent.EVENT_PROMPT_FREQUENCY_CONFIG_NOT_FOUND
+      );
+      return frequencyCapConfig.anyPromptFrequencyCap?.frequencyCapDuration;
     }
-    return true;
+    return duration;
+  }
+
+  private getGlobalFrequencyCapDuration_(
+    frequencyCapConfig: FrequencyCapConfig,
+    interventionFunnel: InterventionFunnel
+  ): Duration | undefined {
+    const duration = interventionFunnel.globalFrequencyCap?.duration;
+    return duration
+      ? duration
+      : frequencyCapConfig.globalFrequencyCap!.frequencyCapDuration;
   }
 
   private isValidFrequencyCap_(
@@ -809,6 +1117,29 @@ export class AutoPromptManager {
   }
 
   private isValidFrequencyCapDuration_(duration: Duration | undefined) {
-    return !!duration?.seconds || !!duration?.nano;
+    return !!duration?.seconds || !!duration?.nanos;
+  }
+
+  private getAutoPromptFunction_(action: Intervention) {
+    return this.isMonetizationAction_(action.type)
+      ? this.getMonetizationPromptFn_()
+      : this.getAudienceActionPromptFn_({
+          actionType: action.type,
+          configurationId: action.configurationId,
+          preference: action.preference,
+        });
+  }
+
+  /**
+   * Checks if provided ExperimentFlag is enabled within article experiment
+   * config.
+   */
+  private isArticleExperimentEnabled_(
+    article: Article,
+    experimentFlag: string
+  ): boolean {
+    const articleExpFlags =
+      this.entitlementsManager_.parseArticleExperimentConfigFlags(article);
+    return articleExpFlags.includes(experimentFlag);
   }
 }

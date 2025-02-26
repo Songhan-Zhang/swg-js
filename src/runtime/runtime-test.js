@@ -368,21 +368,6 @@ describes.realWin('Runtime', (env) => {
       expect(analytics.readyForLogging_).to.be.true;
     });
 
-    it('sets article endpoint on by default', async () => {
-      runtime = new Runtime(win);
-      const configuredRuntime = await runtime.configured_(true);
-      const entitlementsManager = configuredRuntime.entitlementsManager();
-      expect(entitlementsManager.useArticleEndpoint_).to.be.true;
-    });
-
-    it('sets useArticleEndpoint from config', async () => {
-      runtime.configure({useArticleEndpoint: false});
-      runtime.init('pub2');
-      const configuredRuntime = await runtime.configured_(true);
-      const entitlementsManager = configuredRuntime.entitlementsManager();
-      expect(entitlementsManager.useArticleEndpoint_).to.be.false;
-    });
-
     it('sets paySwgVersion from config', async () => {
       runtime.configure({paySwgVersion: '123'});
       runtime.init('pub2');
@@ -391,6 +376,16 @@ describes.realWin('Runtime', (env) => {
         .clientConfigManager()
         .getClientConfig();
       expect(clientConfig.paySwgVersion).to.eq('123');
+    });
+
+    it('should set ClientOptions based on root element language', async () => {
+      win.document.documentElement.lang = 'pt-br';
+
+      runtime.init('pub2');
+      const configuredRuntime = await runtime.configured_(true);
+      const lang = await configuredRuntime.clientConfigManager().getLanguage();
+
+      expect(lang).to.eq('pt-br');
     });
   });
 
@@ -865,9 +860,7 @@ describes.realWin('Runtime', (env) => {
       sandbox
         .stub(XhrFetcher.prototype, 'fetchCredentialedJson')
         .callsFake(() => Promise.resolve(article));
-      runtime = new ConfiguredRuntime(new GlobalDoc(win), config, {
-        useArticleEndpoint: true,
-      });
+      runtime = new ConfiguredRuntime(new GlobalDoc(win), config);
 
       await runtime.getEntitlements();
 
@@ -881,9 +874,7 @@ describes.realWin('Runtime', (env) => {
       const xhrFetchStub = sandbox
         .stub(XhrFetcher.prototype, 'fetchCredentialedJson')
         .callsFake(() => Promise.resolve(article));
-      runtime = new ConfiguredRuntime(new GlobalDoc(win), config, {
-        useArticleEndpoint: true,
-      });
+      runtime = new ConfiguredRuntime(new GlobalDoc(win), config);
       await runtime.getEntitlements();
       expect(xhrFetchStub).to.be.calledOnce;
     });
@@ -900,7 +891,6 @@ describes.realWin('Runtime', (env) => {
       );
       runtime = new ConfiguredRuntime(new GlobalDoc(win), config, {
         fetcher: otherFetcher,
-        useArticleEndpoint: true,
       });
 
       await runtime.getEntitlements();
@@ -1050,13 +1040,13 @@ describes.realWin('ConfiguredRuntime', (env) => {
     );
     runtime = new ConfiguredRuntime(win, config);
 
-    expect(entitlementsManagerSpy.getCall(0).args[5]).to.be.false;
+    expect(entitlementsManagerSpy.getCall(0).args[4]).to.be.false;
 
     runtime = new ConfiguredRuntime(win, config, {
       enableDefaultMeteringHandler: true,
     });
 
-    expect(entitlementsManagerSpy.getCall(1).args[5]).to.be.true;
+    expect(entitlementsManagerSpy.getCall(1).args[4]).to.be.true;
   });
 
   describe('while configuring', () => {
@@ -1388,13 +1378,6 @@ describes.realWin('ConfiguredRuntime', (env) => {
           runtime.configure({skipAccountCreationScreen: 'true'});
         expect(mistake).to.throw(
           'skipAccountCreationScreen must be a boolean, type: string'
-        );
-      });
-
-      it('throws on unknown useArticleEndpoint value', () => {
-        const mistake = () => runtime.configure({useArticleEndpoint: 'true'});
-        expect(mistake).to.throw(
-          'useArticleEndpoint must be a boolean, type: string'
         );
       });
 
@@ -2344,6 +2327,10 @@ subscribe() method'
 
     describe('getAvailableInterventions', () => {
       it('starts getAvailableInterventions', async () => {
+        entitlementsManagerMock
+          .expects('getEntitlements')
+          .resolves({clone: () => null})
+          .once();
         const mockResult = [];
         entitlementsManagerMock
           .expects('getAvailableInterventions')
